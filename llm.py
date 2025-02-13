@@ -167,10 +167,10 @@ class GPTTokenizer:
         
     def decode(self, ids):
         """Decode token ids back to text"""
-        tokens = [self.decoder[id] for id in ids]
+        # Convert ids to tokens using decoder, default to <unk> for unknown ids
+        tokens = [self.decoder.get(id, '<unk>') for id in ids]
+        # Simply join the tokens together
         text = ''.join(tokens)
-        # Clean up any byte-level encoding
-        text = bytearray([self.byte_decoder[c] for c in text]).decode('utf-8', errors='replace')
         return text
 
 def bytes_to_unicode():
@@ -192,94 +192,83 @@ def train_tokenizer(texts, min_frequency=2):
     tokenizer.train(texts, min_frequency)
     return tokenizer
 
-ds = load_dataset("HuggingFaceFW/fineweb-edu", split="train", streaming=True)
-documents_train = []
-for i, example in enumerate(ds):
-    if i >= 10000:
-        break
-    documents_train.append(example["text"])
+if __name__ == "__main__":
+    ds = load_dataset("HuggingFaceFW/fineweb-edu", split="train", streaming=True)
+    documents_train = []
+    for i, example in enumerate(ds):
+        if i >= 100000:
+            break
+        documents_train.append(example["text"])
 
-if not os.path.exists("tokenizer.json"):
-    tokenizer = train_tokenizer(documents_train)
-else:
-    with open("tokenizer.json", "r") as f:
-        encoder = json.load(f)
-        vocab_size = len(encoder) + 1  # +1 for <unk> token
-        tokenizer = GPTTokenizer(vocab_size=vocab_size)
-        tokenizer.encoder = encoder
-        tokenizer.decoder = {v: k for k, v in encoder.items()}
+    if not os.path.exists("tokenizer.json"):
+        tokenizer = train_tokenizer(documents_train)
+    else:
+        with open("tokenizer.json", "r") as f:
+            encoder = json.load(f)
+            vocab_size = len(encoder) + 1  # +1 for <unk> token
+            tokenizer = GPTTokenizer(vocab_size=vocab_size)
+            tokenizer.encoder = encoder
+            tokenizer.decoder = {v: k for k, v in encoder.items()}
 
-# Verify tokenizer is properly loaded
-if len(tokenizer.encoder) == 0 or len(tokenizer.decoder) == 0:
-    print("Warning: Tokenizer vocabulary is empty!")
-    tokenizer = train_tokenizer(documents_train)  # Fallback to training new tokenizer
+    # Verify tokenizer is properly loaded
+    if len(tokenizer.encoder) == 0 or len(tokenizer.decoder) == 0:
+        print("Warning: Tokenizer vocabulary is empty!")
+        tokenizer = train_tokenizer(documents_train)  # Fallback to training new tokenizer
 
-# Save the tokenizer
-with open("tokenizer.json", "w") as f:
-    json.dump(tokenizer.encoder, f)
+    # Save the tokenizer
+    with open("tokenizer.json", "w") as f:
+        json.dump(tokenizer.encoder, f)
 
-# Print vocabulary size for debugging
-print(f"Vocabulary size: {tokenizer.vocab_size}")
-print(f"Number of tokens in encoder: {len(tokenizer.encoder)}")
+    # Print vocabulary size for debugging
+    print(f"Vocabulary size: {tokenizer.vocab_size}")
+    print(f"Number of tokens in encoder: {len(tokenizer.encoder)}")
 
-# Train the model with the correct vocabulary size
-model = GPT(vocab_size=tokenizer.vocab_size, block_size=128, n_heads=4, n_blocks=4, dropout=0.0, d_model=128)
+    # Train the model with the correct vocabulary size
+    model = GPT(vocab_size=tokenizer.vocab_size, block_size=128, n_heads=4, n_blocks=4, dropout=0.0, d_model=128)
 
-# Debug: Print max token ID
-max_token_id = max(tokenizer.encoder.values())
-print(f"Maximum token ID in encoder: {max_token_id}")
+    # Debug: Print max token ID
+    max_token_id = max(tokenizer.encoder.values())
+    print(f"Maximum token ID in encoder: {max_token_id}")
 
-# count parameters:
-total_params = sum(p.numel() for p in model.parameters())
-print(f"Total parameters: {total_params}")
+    # count parameters:
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params}")
 
-optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
 
 
-for epoch in range(10):
-    for i, text in tqdm(enumerate(documents_train)):
-        tokens = tokenizer.encode(text)
-        if len(tokens) < 2:  # Skip very short sequences
-            continue
+    for epoch in range(1):
+        for i, text in tqdm(enumerate(documents_train)):
+            tokens = tokenizer.encode(text)
+            if i==0:
+                print(tokens)
+            if len(tokens) < 2:  # Skip very short sequences
+                continue
+                
+            # Truncate long sequences
+            if len(tokens) > 128:  # block_size is 128
+                tokens = tokens[:128]
+                
+            # Verify token IDs are within range
+            if max(tokens) >= tokenizer.vocab_size:
+                print(f"Warning: Token ID {max(tokens)} >= vocab_size {tokenizer.vocab_size}")
+                continue
+                
+            # Create input and target sequences
+            input_tokens = tokens[:-1]
+            target_tokens = tokens[1:]
             
-        # Truncate long sequences
-        if len(tokens) > 128:  # block_size is 128
-            tokens = tokens[:128]
+            # Convert to tensors and add batch dimension
+            input_tokens = torch.tensor(input_tokens, dtype=torch.long).unsqueeze(0)
+            target_tokens = torch.tensor(target_tokens, dtype=torch.long).unsqueeze(0)
             
-        # Verify token IDs are within range
-        if max(tokens) >= tokenizer.vocab_size:
-            print(f"Warning: Token ID {max(tokens)} >= vocab_size {tokenizer.vocab_size}")
-            continue
-            
-        # Create input and target sequences
-        input_tokens = tokens[:-1]
-        target_tokens = tokens[1:]
+            optimizer.zero_grad()
+            logits, loss = model(input_tokens, target_tokens)
+            loss.backward()
+            optimizer.step()
+            if i % 1000 == 0:
+                print(f"Step {i} loss: {loss.item()}")
+        print(f"Epoch {epoch} loss: {loss.item()}")
         
-        # Convert to tensors and add batch dimension
-        input_tokens = torch.tensor(input_tokens, dtype=torch.long).unsqueeze(0)
-        target_tokens = torch.tensor(target_tokens, dtype=torch.long).unsqueeze(0)
-        
-        optimizer.zero_grad()
-        logits, loss = model(input_tokens, target_tokens)
-        loss.backward()
-        optimizer.step()
-        if i % 100 == 0:
-            print
-    print(f"Epoch {epoch} loss: {loss.item()}")
-    
-    # Save the model
-    torch.save(model.state_dict(), f"model_{epoch}.pt")
-
-class Tokenizer:
-    def __init__(self):
-        # ... existing code ...
-        print(f"Vocabulary size: {len(self.encoder)}")
-        # Print some sample tokens to debug
-        print("Sample tokens:", list(self.encoder.items())[:10])
-
-    def encode(self, text):
-        ids = [self.encoder[token] for token in text]
-        return ids
-
-    def get_token_count(self, text):
-        return len(self.encode(text))
+        # Save the model
+        torch.save(model.state_dict(), f"model_{epoch}.pt")
